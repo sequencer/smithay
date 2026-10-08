@@ -215,6 +215,8 @@ where
 /// throttle threshold. If the threshold is `None` this will never send frame callbacks
 /// for a surface that is not visible. Specifying [`Duration::ZERO`] as the throttle threshold
 /// will always send frame callbacks for non visible surfaces.
+///
+/// Surfaces without a buffer, and their subsurfaces, are not mapped and get no frame callbacks.
 pub fn send_frames_surface_tree<T, F>(
     surface: &wl_surface::WlSurface,
     output: &Output,
@@ -227,11 +229,32 @@ pub fn send_frames_surface_tree<T, F>(
 {
     let time = time.into();
 
+    // A surface without a buffer is not mapped, and neither are its subsurfaces: they get no frame
+    // callbacks, as nothing of them is presented. Clients may take a frame callback as proof that
+    // their buffer is shown; Firefox's native compositor then never maps its layer container,
+    // which it gives a buffer only while it has none.
+    let has_buffer = |states: &SurfaceData| {
+        states
+            .data_map
+            .get::<RendererSurfaceStateUserData>()
+            .is_some_and(|data| data.lock().unwrap().buffer().is_some())
+    };
+
     with_surface_tree_downward(
         surface,
         (),
-        |_, _, &()| TraversalAction::DoChildren(()),
+        |_, states, &()| {
+            if has_buffer(states) {
+                TraversalAction::DoChildren(())
+            } else {
+                TraversalAction::SkipChildren
+            }
+        },
         |surface, states, &()| {
+            if !has_buffer(states) {
+                return;
+            }
+
             states
                 .data_map
                 .insert_if_missing_threadsafe(SurfaceFrameThrottlingState::default);
